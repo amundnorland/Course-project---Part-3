@@ -35,8 +35,7 @@ data = {
     'Grid_capacity': 20,
     'Initial_battery_storage': 2
 }
-
-# Define the stochastic model setup
+#Define the model setup
 def StochasticModelSetUp(data, constants):
     # Create a concrete model
     m = pyo.ConcreteModel()
@@ -76,7 +75,31 @@ def StochasticModelSetUp(data, constants):
     m.q_charge = pyo.Var(m.T, m.S, within=pyo.NonNegativeReals)  # Battery charge
     m.q_discharge = pyo.Var(m.T, m.S, within=pyo.NonNegativeReals)  # Battery discharge
     # Battery energy storage (shared across scenarios)
-    m.e_storage = pyo.Var(m.T, within=pyo.NonNegativeReals, bounds=(0, m.E_max))  
+    m.e_storage = pyo.Var(m.T, within=pyo.NonNegativeReals, bounds=(0, m.E_max)) 
+
+
+#Mathematical formulation 1st stage
+def Obj_first_stage(m):
+    return -sum(m.x_aFRR[t] * m.P_aFRR[t] for t in m.T) + m.alpha
+m.obj = pyo.Objective(rule=Obj_first_stage, sense=pyo.minimize)
+
+def EnergyBalance(m, t, s):
+    return m.D[t] + m.x_aFRR[t] == sum(m.y_supply[t, s, i] for i in m.I) - m.z_export[t, s] + m.q_discharge[t, s] - m.eta_charge * m.q_charge[t, s]
+m.EnergyBalance = pyo.Constraint(m.T, m.S, rule=EnergyBalance)
+
+def ReserveMarketLimit(m, t, s):
+    return m.x_aFRR[t] <= m.q_charge[t,s] + m.q_discharge[t,s]
+m.ReserveMarketLimit = pyo.Constraint(m.T,m.S, rule=ReserveMarketLimit)
+
+def ExportLimit(m, t, s):
+    return m.z_export[t, s] + m.x_aFRR[t] <= m.G_max
+m.ExportLimit = pyo.Constraint(m.T, m.S, rule=ExportLimit)
+
+def CreateCuts(m,)
+
+
+
+# Define the stochastic model setup
 
     # Objective Function: Expected cost over all scenarios
     def Obj(m):
@@ -88,6 +111,7 @@ def StochasticModelSetUp(data, constants):
                    m.z_export[t, s] * m.C_exp[t]
                    for t in m.T) for s in m.S)
     m.obj = pyo.Objective(rule=Obj, sense=pyo.minimize)
+
 
     # Constraints
     def EnergyBalance(m, t, s):
@@ -134,7 +158,6 @@ def StochasticModelSetUp(data, constants):
         return m.z_export[t, s] + m.x_aFRR[t] <= m.G_max
     m.ExportLimit = pyo.Constraint(m.T, m.S, rule=ExportLimit)
 
-    return m
 
 # Solve the model
 def SolveModel(m):
