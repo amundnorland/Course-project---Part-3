@@ -99,7 +99,6 @@ def CreateCuts(m,)
 
 
 
-# Define the stochastic model setup
 
     # Objective Function: Expected cost over all scenarios
     def Obj(m):
