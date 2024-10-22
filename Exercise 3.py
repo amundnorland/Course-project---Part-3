@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 # Constants
 constants = {
-    "time_periods": 24,
+    "time_periods": 3,
     "energy_sources": ["Grid", "Solar", "Battery"],
     "scenarios": ["S_high", "S_avg", "S_low"],
     #####CHANGING THESE VALUES WHEN SOLVING FOR EACH SCENARIO INDIVIDUALLY#####
@@ -14,9 +14,7 @@ constants = {
 
 # Input Data (generate random grid cost for each time period)
 data = {
-    'Cost_grid': [5.2, 6.0, 5.5, 5.8, 6.2, 7.1, 9.3, 12.5, 14.1, 13.8, 
-                12.9, 11.5, 10.4, 9.7, 8.5, 9.0, 10.1, 11.8, 12.3, 
-                14.0, 13.5, 10.8, 7.9, 6.7],
+    'Cost_grid': [5.2, 10.4, 6.7],
     'Cost_solar': 0,  # Solar has zero marginal cost
     'Cost_battery': 10,
     'aFRR_price': 10,  # aFRR price 
@@ -78,7 +76,7 @@ def First_stage_model(data, constants, Cuts):
         return m.alpha >= m.Phi[c] + sum(m.Lambda[c, t] * (m.x_aFRR[t] - m.x_hat[c, t]) for t in m.T)
     m.Optimality_cut = pyo.Constraint(m.C, rule=Optimality_cut)
 
-    return m
+    
 
    #def Feasibility_cut(m,c):
      #  return m.alpha >= 0
@@ -88,7 +86,7 @@ def First_stage_model(data, constants, Cuts):
 
 #Subproblem: Define model setup
 #Mathematical formulation 2nd stage
-def Second_stage_model(data, constants, X_hat):
+def Second_stage_model(data, constants, x_hat):
     
     m = pyo.ConcreteModel()
 
@@ -103,6 +101,7 @@ def Second_stage_model(data, constants, X_hat):
     m.C_grid = pyo.Param(m.T, initialize={t: data['Cost_grid'][t-1] for t in m.T})
     m.C_solar = pyo.Param(initialize=data['Cost_solar'])  # Solar cost is constant
     m.C_battery = pyo.Param(initialize=data['Cost_battery'])  # Battery cost is constant
+    m.penalty = 10000  # Large penalty for using the artificial variables
     m.C_exp = pyo.Param(m.T, initialize={t: 0.9 * data['Cost_grid'][t-1] for t in m.T})
     m.P_aFRR = pyo.Param(m.T, initialize=data['aFRR_price'])  # aFRR price
     
@@ -123,7 +122,7 @@ def Second_stage_model(data, constants, X_hat):
     #Parameter for cuts
     m.Phi = pyo.Param(m.C, initialize = Cuts["Phi"])
     m.Lambda = pyo.Param(m.C, m.T, initialize = Cuts["lambda"])
-    m.X_hat = pyo.Param(m.T, initialize = X_hat)
+    m.x_hat = pyo.Param(m.T, initialize = x_hat)
 
     # Variables 
     m.x_aFRR = pyo.Var(m.T, within=pyo.NonNegativeReals)  # aFRR reserve (first-stage decision)
@@ -134,23 +133,28 @@ def Second_stage_model(data, constants, X_hat):
     m.q_discharge = pyo.Var(m.T, m.S, within=pyo.NonNegativeReals)  # Battery discharge
     # Battery energy storage (shared across scenarios)
     m.e_storage = pyo.Var(m.T, within=pyo.NonNegativeReals, bounds=(0, m.E_max))
+    # Add artificial variables to the model to account for infeasibilities
+    m.slack_energy_balance = pyo.Var(m.T, m.S, within=pyo.NonNegativeReals)
+
+
 
     def Obj_second_stage(m):
         return sum(m.pi[s] * sum(
                     m.y_supply[t, s, 'Grid'] * m.C_grid[t] + \
                     m.y_supply[t, s, 'Battery'] * m.C_battery + \
                     m.y_supply[t, s, 'Solar'] * m.C_solar - \
-                    m.z_export[t, s] * m.C_exp[t]
+                    m.z_export[t, s] * m.C_exp[t] + \
+                    m.penalty * m.slack_energy_balance[t, s]  # Penalize artificial variable usage
                     for t in m.T) for s in m.S)
     m.obj = pyo.Objective(rule=Obj_second_stage, sense=pyo.minimize)
-    
 
+    
     def EnergyBalance_sec(m, t, s):
-        return m.D[t] + m.x_aFRR[t] == sum(m.y_supply[t, s, i] for i in m.I) - m.z_export[t, s] + m.q_discharge[t, s] - m.eta_charge * m.q_charge[t, s]
+        return m.D[t] + m.x_aFRR[t] == sum(m.y_supply[t, s, i] for i in m.I) - m.z_export[t, s] + m.q_discharge[t, s] - m.eta_charge * m.q_charge[t, s] + m.slack_energy_balance[t, s]
     m.EnergyBalance_sec = pyo.Constraint(m.T, m.S, rule=EnergyBalance_sec)
 
     def ReserveMarketLimit_sec(m, t, s):
-        return m.x_aFRR[t] <= m.q_charge[t,s] + m.q_discharge[t,s]
+        return m.x_aFRR[t] <= m.q_charge[t,s] + m.q_discharge[t,s] + m.slack_energy_balance[t, s] 
     m.ReserveMarketLimit_sec = pyo.Constraint(m.T,m.S, rule=ReserveMarketLimit_sec)
 
     def StorageDynamics(m, t, s):
@@ -190,8 +194,19 @@ def Second_stage_model(data, constants, X_hat):
     m.ExportLimit_sec = pyo.Constraint(m.T, m.S, rule=ExportLimit_sec)
 
     def Lambda_constraint(m, t):
-        return m.x_aFRR[t] == m.X_hat[t]
+        return m.x_aFRR[t] == m.x_hat[t]
     m.Lambda_constraint = pyo.Constraint(m.T, rule=Lambda_constraint)
+
+    for t in m.T:
+        for s in m.S:
+            for i in m.I:
+                print(f"y_supply[{t}, {s}, {i}] = {m.y_supply[t, s, i].value}")
+                print(f"q_charge[{t}, {s}] = {m.q_charge[t, s].value}")
+                print(f"q_discharge[{t}, {s}] = {m.q_discharge[t, s].value}")
+                print(f"e_storage[{t}] = {m.e_storage[t].value}")
+                print(f"z_export[{t}, {s}] = {m.z_export[t, s].value}")
+                print(f"x_aFRR[{t}] = {m.x_aFRR[t].value}")
+                print(f"x_hat[{t}] = {m.x_hat[t]}")
     return m
 
 
@@ -200,7 +215,9 @@ def SolveModel(m):
     solver = SolverFactory('gurobi')
     m.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
     results = solver.solve(m, tee=True)
+    
     return results, m
+
 
 # Display results
 def DisplayResults(m):
@@ -215,19 +232,19 @@ def Create_cuts(Cuts, m):
     Cuts["Phi"][cut_it] = pyo.value(m.obj)
 
     # Add new lambda and x_hat values for the new cut
-    Cuts["lambda"][cut_it] = {}
-    Cuts["x_hat"][cut_it] = {}
+    #Cuts["lambda"][cut_it] = {}
+    #Cuts["x_hat"][cut_it] = {}
 
     for t in m.T:
-        Cuts["lambda"][cut_it][t] = pyo.value(m.dual[m.Lambda_constraint[t]])
-        Cuts["x_hat"][cut_it][t] = pyo.value(m.x_hat[t])
+        Cuts["lambda"][cut_it][t] = m.dual[m.Lambda_constraint[t]]        #pyo.value(m.dual[m.Lambda_constraint[t]])
+        Cuts["x_hat"][cut_it][t] = m.x_hat[t]       #pyo.value(m.x_hat[t])
 
     return Cuts
 
 
 
 #Using a for loop for iteration
-for i in range(10):
+for i in range(5):
 
     #Solve 1st stage problem
     m_first_stage = First_stage_model(data, constants, Cuts)
@@ -236,24 +253,38 @@ for i in range(10):
 
     #First stage result process with x_hat value
     #First stage result process with x_hat value using numerical indices
-    X_hat = {t: pyo.value(m_first_stage.x_aFRR[t]) for t in range(1, 25)}
+    x_hat = {t: pyo.value(m_first_stage.x_aFRR[t]) for t in range(1, 2)}
 
   
     
     #Printing first stage results
     print(f"Iteration {i}")
-    for t in X_hat:
-        print(f"t{t}: {X_hat[t]}")
+    for t in x_hat:
+        print(f"t{t}: {x_hat[t]}")
     input()
     
     #Setup and solve 2nd stage problem
-    m_second_stage = Second_stage_model(data, constants, X_hat)
+    m_second_stage = Second_stage_model(data, constants, x_hat)
     SolveModel(m_second_stage)
 
-
+    
     #Creating cuts for the first stage model
     Cuts = Create_cuts(Cuts,m_second_stage)
     
+    #Print results for second stage
+    print("Objective function:", pyo.value(m_second_stage.obj))
+    print("Cut information acquired:")
+    for component in Cuts:
+        if component == "lambda" or component == "x_hat":
+            for t in m_second_stage.T:
+                # Check if t exists in Cuts[component]
+                if t in Cuts[component]:
+                    print(component, t, Cuts[component][t])
+                else:
+                    print(f"Warning: {component}[{t}] not found")
+        else:
+            print(component, Cuts[component])
+"""
     #Print results for second stage
     print("Objective function:",pyo.value(m_second_stage.obj))
     print("Cut information acquired:")
@@ -263,13 +294,15 @@ for i in range(10):
                 print(component,t,Cuts[component][t])
         else:
             print(component,Cuts[component])
-    input()
-    
-    #Performing a convergence check with upper and lower bound
-    print("UB:",pyo.value(m_first_stage.alpha.value),"- LB:",pyo.value(m_second_stage.obj_second))
-    input()
 """
+input()
 
+
+#Performing a convergence check with upper and lower bound
+print("UB:",pyo.value(m_first_stage.alpha.value),"- LB:",pyo.value(m_second_stage.obj))
+input()
+
+"""
 def plot_variables_for_all_timesteps(m_first_stage, m_second_stage, constants):
     # Initialize empty lists to store the results
     x_aFRR_vals = []
