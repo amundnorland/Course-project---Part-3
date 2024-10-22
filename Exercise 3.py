@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 # Constants
 constants = {
-    "time_periods": 3,
+    "time_periods": 2,
     "energy_sources": ["Grid", "Solar", "Battery"],
     "scenarios": ["S_high", "S_avg", "S_low"],
     #####CHANGING THESE VALUES WHEN SOLVING FOR EACH SCENARIO INDIVIDUALLY#####
@@ -14,7 +14,7 @@ constants = {
 
 # Input Data (generate random grid cost for each time period)
 data = {
-    'Cost_grid': [5.2, 10.4, 6.7],
+    'Cost_grid': [5.2, 10.4],
     'Cost_solar': 0,  # Solar has zero marginal cost
     'Cost_battery': 10,
     'aFRR_price': 10,  # aFRR price 
@@ -222,7 +222,7 @@ def DisplayResults(m):
 
 
 #Using a for loop for iteration
-for i in range(5):
+for i in range(10):
 
     #Solve 1st stage problem
     m_first_stage = First_stage_model(data, constants, Cuts)
@@ -240,17 +240,25 @@ for i in range(5):
     for t in x_hat:
         print(f"t{t}: {x_hat[t]}")
     input()
-    
+
     #Setup and solve 2nd stage problem
     m_second_stage = Second_stage_model(data, constants, x_hat)
     SolveModel(m_second_stage)
 
-    
+    # Print the slack variables for each time period and scenario
+    for t in m_second_stage.T:
+        x_aFRR = pyo.value(m_second_stage.x_aFRR[t])
+        print(f"Iteration {i}, Time {t} x_aFRR: {x_aFRR}")
+        for s in m_second_stage.S:
+            slack_value = pyo.value(m_second_stage.slack_energy_balance[t,s])
+            print(f"Iteration {i}, Time {t} Slack: {slack_value}")
+
     #Creating cuts for the first stage model
     Cuts = Create_cuts(Cuts,m_second_stage)
     
     #Print results for second stage
-    print("Objective function:", pyo.value(m_second_stage.obj))
+    print("UB:",pyo.value(m_first_stage.alpha.value),"- LB:",pyo.value(m_second_stage.obj))
+    print("Objective value of problem:", pyo.value(m_second_stage.obj()-m_first_stage.x_aFRR[1].value*5,2-m_first_stage.x_aFRR[2]*10.4)) 
     print("Cut information acquired:")
     for component in Cuts:
         if component == "lambda" or component == "x_hat":
@@ -258,102 +266,15 @@ for i in range(5):
                 # Check if t exists in Cuts[component]
                 if t in Cuts[component]:
                     print(component, t, Cuts[component][t])
-                else:
-                    print(f"Warning: {component}[{t}] not found")
+                
         else:
             print(component, Cuts[component])
 
     input()
-"""
-    #Print results for second stage
-    print("Objective function:",pyo.value(m_second_stage.obj))
-    print("Cut information acquired:")
-    for component in Cuts:
-        if component == "lambda" or component == "x_hat":
-            for t in m_second_stage.T:
-                print(component,t,Cuts[component][t])
-        else:
-            print(component,Cuts[component])
-"""
     
 
 
 #Performing a convergence check with upper and lower bound
 print("UB:",pyo.value(m_first_stage.alpha.value),"- LB:",pyo.value(m_second_stage.obj))
+print("Objective value of problem:", pyo.value(m_second_stage.obj()-m_first_stage.x_aFRR[1].value*5,2-m_first_stage.x_aFRR[2]*10.4)) 
 input()
-
-"""
-def plot_variables_for_all_timesteps(m_first_stage, m_second_stage, constants):
-    # Initialize empty lists to store the results
-    x_aFRR_vals = []
-    for t in m_first_stage.T:
-        if m_first_stage.x_aFRR[t].is_initialized():
-            x_aFRR_vals.append(pyo.value(m_first_stage.x_aFRR[t]))
-        else:
-            x_aFRR_vals.append(None)
-    
-    # Collect values from the second stage for all timesteps and scenarios
-    scenarios = constants['scenarios']
-    y_supply_vals = {source: [] for source in constants['energy_sources']}
-    z_export_vals = []
-    q_charge_vals = []
-    q_discharge_vals = []
-    e_storage_vals = []
-
-    for t in m_second_stage.T:
-        for source in constants['energy_sources']:
-            for s in scenarios:
-                if m_second_stage.y_supply[t, s, source].is_initialized():
-                    y_supply_vals[source].append(pyo.value(m_second_stage.y_supply[t, s, source]))
-                else:
-                    y_supply_vals[source].append(None)
-
-        for s in scenarios:
-            if m_second_stage.z_export[t, s].is_initialized():
-                z_export_vals.append(pyo.value(m_second_stage.z_export[t, s]))
-            else:
-                z_export_vals.append(None)
-            if m_second_stage.q_charge[t, s].is_initialized():
-                q_charge_vals.append(pyo.value(m_second_stage.q_charge[t, s]))
-            else:
-                q_charge_vals.append(None)
-            if m_second_stage.q_discharge[t, s].is_initialized():
-                q_discharge_vals.append(pyo.value(m_second_stage.q_discharge[t, s]))
-            else:
-                q_discharge_vals.append(None)
-
-        if m_second_stage.e_storage[t].is_initialized():
-            e_storage_vals.append(pyo.value(m_second_stage.e_storage[t]))
-        else:
-            e_storage_vals.append(None)
-    
-    # Plot the values (handle missing data with default values like None or 0)
-    plt.figure(figsize=(10, 12))
-
-    # Plot aFRR Reserve
-    plt.subplot(3, 2, 1)
-    plt.plot(range(1, constants['time_periods'] + 1), x_aFRR_vals, label='x_aFRR')
-    plt.title('aFRR Reserve (All Timesteps)')
-    plt.xlabel('Time')
-    plt.ylabel('x_aFRR')
-    plt.grid()
-
-    # Plot energy supply (second stage)
-    plt.subplot(3, 2, 2)
-    for source, values in y_supply_vals.items():
-        plt.plot(range(1, len(values) + 1), values, label=f'y_supply ({source})')
-    plt.title('Energy Supply (All Timesteps)')
-    plt.xlabel('Time')
-    plt.ylabel('Supply')
-    plt.legend()
-    plt.grid()
-
-    # Plot energy export
-    plt.subplot(3, 2, 3)
-    plt.plot(range(1, len(z_export_vals) + 1), z_export_vals, label='z_export')
-    plt.title('Energy Export (All Timesteps)')
-    plt.xlabel('Time')
-    return
-
-plot_variables_for_all_timesteps(m_first_stage, m_second_stage, constants)
-"""
