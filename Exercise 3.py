@@ -34,18 +34,57 @@ data = {
     'Initial_battery_storage': 2
 }
 
-#Setup for Benders decomposition - Perform this for x-iterations
-Cuts = {}
-Cuts["Set"] = []
-Cuts["Phi"] = {}
-Cuts["lambda"] = {}
-Cuts["x_hat"] = {}
+#Mathematical formulation first stage
+def Obj_first_stage(m):
+        return -sum(m.x_aFRR[t] * m.P_aFRR[t] for t in m.T) + m.alpha
+def ReserveMarketLimit_first_stage(m, t):
+        return m.x_aFRR[t] <= m.G_max
+def Optimality_cut(m, c):           # Create Benders Optimality cuts from first stage
+        return m.alpha >= m.Phi[c] + sum(m.Lambda[c, t] * (m.x_aFRR[t] - m.x_hat[c, t]) for t in m.T)
+
+
+#Mathematical formulation second stage
+def Obj_second_stage(m):
+    return sum(m.pi[s] * sum(
+        m.y_supply[t, s, 'Grid'] * m.C_grid[t] + \
+        m.y_supply[t, s, 'Battery'] * m.C_battery + \
+        m.y_supply[t, s, 'Solar'] * m.C_solar - \
+        m.z_export[t, s] * m.C_exp[t] + \
+        m.penalty * m.slack_energy_balance[t, s]  # Penalize artificial variable usage
+        for t in m.T) for s in m.S)
+def EnergyBalance_sec(m, t, s):
+        return m.D[t] + m.x_aFRR[t] == sum(m.y_supply[t, s, i] for i in m.I) - m.z_export[t, s] + m.q_discharge[t, s] - m.eta_charge * m.q_charge[t, s] + m.slack_energy_balance[t, s]
+def ReserveMarketLimit_sec(m, t, s):
+        return m.x_aFRR[t] <= m.q_charge[t,s] + m.q_discharge[t,s] + m.slack_energy_balance[t, s] 
+def StorageDynamics(m, t, s):
+        if t == 1:
+            return m.e_storage[t] == m.I_INIT
+        else:
+            return m.e_storage[t] == m.e_storage[t-1] + m.q_charge[t-1, s] - m.q_discharge[t-1, s] / m.eta_discharge
+        
+def BatteryLimits(m, t):
+    return m.e_storage[t] <= m.E_max
+def ChargeLimit(m, t, s):
+    return m.q_charge[t, s] <= m.P_charge_max
+def DischargeLimit(m, t, s):
+    return m.q_discharge[t, s] <= m.P_discharge_max
+def BatterySupplyLimit(m, t, s):
+    return m.y_supply[t, s, 'Battery'] <= m.eta_discharge * m.e_storage[t]
+def ImportLimit(m, t, s):
+    return m.y_supply[t, s, 'Grid'] <= m.G_max
+def SolarPowerLimit(m, t, s):
+    return m.y_supply[t, s, 'Solar'] == m.G_solar[t, s]
+def ExportLimit_sec(m, t, s):
+    return m.z_export[t, s] + m.x_aFRR[t] <= m.G_max + m.slack_energy_balance[t, s]
+def Lambda_constraint(m, t):
+    return m.x_aFRR[t] == m.x_hat[t]
+    
+
 
 #Master problem: Define the model setup
-#Mathematical formulation first stage
 def First_stage_model(data, constants, Cuts):
+    
     m = pyo.ConcreteModel()
-
     # Sets
     m.T = pyo.RangeSet(1, constants["time_periods"])  # Time periods
     m.C = pyo.Set(initialize=Cuts["Set"])  # Set for cuts 
@@ -53,39 +92,28 @@ def First_stage_model(data, constants, Cuts):
     # Parameters
     m.P_aFRR = pyo.Param(m.T, initialize=data['aFRR_price'])  # aFRR price
     m.G_max = pyo.Param(initialize=data['Grid_capacity'])  # Grid capacity limit
-    m.Phi = pyo.Param(m.C, initialize=Cuts["Phi"])  # Initialize cuts
-    m.Lambda = pyo.Param(m.C, m.T, initialize=Cuts["lambda"], mutable=True)  # 2D dictionary (cut x time)
-    m.x_hat = pyo.Param(m.C, m.T, initialize=Cuts["x_hat"], mutable=True)  # 2D dictionary (cut x time)
+
+
+    # Parameters for cuts
+    m.Phi = pyo.Param(m.C, initialize=Cuts["Phi"], default = 0)  # Initialize cuts
+    m.Lambda = pyo.Param(m.C, m.T, initialize=Cuts["lambda"])  
+    m.x_hat = pyo.Param(m.C, m.T, initialize=Cuts["x_hat"]) 
 
     # Variables
     m.x_aFRR = pyo.Var(m.T, within=pyo.NonNegativeReals)  # aFRR reserve (first-stage decision)
     m.alpha = pyo.Var(bounds=(0, 1000000))  # Approximates second-stage cost
 
     # Objective: minimize first-stage cost with the approximation of the second-stage cost (alpha)
-    def Obj_first_stage(m):
-        return -sum(m.x_aFRR[t] * m.P_aFRR[t] for t in m.T) + m.alpha
     m.obj = pyo.Objective(rule=Obj_first_stage, sense=pyo.minimize)
-
     # Constraints
-    def ReserveMarketLimit_first_stage(m, t):
-        return m.x_aFRR[t] <= m.G_max
     m.ReserveMarketLimit_first_stage = pyo.Constraint(m.T, rule=ReserveMarketLimit_first_stage)
-
-    # Create Benders Optimality cuts from first stage
-    def Optimality_cut(m, c):
-        return m.alpha >= m.Phi[c] + sum(m.Lambda[c, t] * (m.x_aFRR[t] - m.x_hat[c, t]) for t in m.T)
     m.Optimality_cut = pyo.Constraint(m.C, rule=Optimality_cut)
-
     
-
-   #def Feasibility_cut(m,c):
-     #  return m.alpha >= 0
-   # m.Feasibility_cut = pyo.Constraint(m.Cut, rule=Feasibility_cut)
-
     return m
 
+
+
 #Subproblem: Define model setup
-#Mathematical formulation 2nd stage
 def Second_stage_model(data, constants, x_hat):
     
     m = pyo.ConcreteModel()
@@ -94,7 +122,7 @@ def Second_stage_model(data, constants, x_hat):
     m.T = pyo.RangeSet(1, constants["time_periods"])  # Time periods
     m.I = pyo.Set(initialize=constants["energy_sources"])  # Energy sources
     m.S = pyo.Set(initialize=constants["scenarios"])  # Scenarios
-    m.C = pyo.Set(initialize = Cuts["Set"]) #Set for cuts
+    #m.C = pyo.Set(initialize = Cuts["Set"]) #Set for cuts
 
 
     # Parameters
@@ -120,10 +148,8 @@ def Second_stage_model(data, constants, x_hat):
     m.I_INIT = pyo.Param(initialize=data['Initial_battery_storage'])
     m.pi = pyo.Param(m.S, initialize=constants["probs"])  # Probability of each scenario
     #Parameter for cuts
-    m.Phi = pyo.Param(m.C, initialize = Cuts["Phi"])
-    m.Lambda = pyo.Param(m.C, m.T, initialize = Cuts["lambda"])
+    
     m.x_hat = pyo.Param(m.T, initialize = x_hat)
-
     # Variables 
     m.x_aFRR = pyo.Var(m.T, within=pyo.NonNegativeReals)  # aFRR reserve (first-stage decision)
     # Energy supply from sources with bounds
@@ -136,79 +162,47 @@ def Second_stage_model(data, constants, x_hat):
     # Add artificial variables to the model to account for infeasibilities
     m.slack_energy_balance = pyo.Var(m.T, m.S, within=pyo.NonNegativeReals)
 
-
-
-    def Obj_second_stage(m):
-        return sum(m.pi[s] * sum(
-                    m.y_supply[t, s, 'Grid'] * m.C_grid[t] + \
-                    m.y_supply[t, s, 'Battery'] * m.C_battery + \
-                    m.y_supply[t, s, 'Solar'] * m.C_solar - \
-                    m.z_export[t, s] * m.C_exp[t] + \
-                    m.penalty * m.slack_energy_balance[t, s]  # Penalize artificial variable usage
-                    for t in m.T) for s in m.S)
+    # Objective function for the second stage problem
     m.obj = pyo.Objective(rule=Obj_second_stage, sense=pyo.minimize)
 
-    
-    def EnergyBalance_sec(m, t, s):
-        return m.D[t] + m.x_aFRR[t] == sum(m.y_supply[t, s, i] for i in m.I) - m.z_export[t, s] + m.q_discharge[t, s] - m.eta_charge * m.q_charge[t, s] + m.slack_energy_balance[t, s]
+    # Constraints
     m.EnergyBalance_sec = pyo.Constraint(m.T, m.S, rule=EnergyBalance_sec)
-
-    def ReserveMarketLimit_sec(m, t, s):
-        return m.x_aFRR[t] <= m.q_charge[t,s] + m.q_discharge[t,s] + m.slack_energy_balance[t, s] 
     m.ReserveMarketLimit_sec = pyo.Constraint(m.T,m.S, rule=ReserveMarketLimit_sec)
-
-    def StorageDynamics(m, t, s):
-        if t == 1:
-            return m.e_storage[t] == m.I_INIT
-        else:
-            return m.e_storage[t] == m.e_storage[t-1] + m.q_charge[t-1, s] - m.q_discharge[t-1, s] / m.eta_discharge
-
     m.StorageDynamics = pyo.Constraint(m.T, m.S, rule=StorageDynamics)
-
-    def BatteryLimits(m, t):
-        return m.e_storage[t] <= m.E_max
     m.BatteryLimits = pyo.Constraint(m.T, rule=BatteryLimits)
-
-    def ChargeLimit(m, t, s):
-        return m.q_charge[t, s] <= m.P_charge_max
     m.ChargeLimit = pyo.Constraint(m.T, m.S, rule=ChargeLimit)
-
-    def DischargeLimit(m, t, s):
-        return m.q_discharge[t, s] <= m.P_discharge_max
     m.DischargeLimit = pyo.Constraint(m.T, m.S, rule=DischargeLimit)
-
-    def BatterySupplyLimit(m, t, s):
-        return m.y_supply[t, s, 'Battery'] <= m.eta_discharge * m.e_storage[t]
     m.BatterySupplyLimit = pyo.Constraint(m.T, m.S, rule=BatterySupplyLimit)
-
-    def ImportLimit(m, t, s):
-        return m.y_supply[t, s, 'Grid'] <= m.G_max
     m.ImportLimit = pyo.Constraint(m.T, m.S, rule=ImportLimit)
-
-    def SolarPowerLimit(m, t, s):
-        return m.y_supply[t, s, 'Solar'] == m.G_solar[t, s]
     m.SolarPowerLimit = pyo.Constraint(m.T, m.S, rule=SolarPowerLimit)
-
-    def ExportLimit_sec(m, t, s):
-        return m.z_export[t, s] + m.x_aFRR[t] <= m.G_max
     m.ExportLimit_sec = pyo.Constraint(m.T, m.S, rule=ExportLimit_sec)
-
-    def Lambda_constraint(m, t):
-        return m.x_aFRR[t] == m.x_hat[t]
     m.Lambda_constraint = pyo.Constraint(m.T, rule=Lambda_constraint)
 
-    for t in m.T:
-        for s in m.S:
-            for i in m.I:
-                print(f"y_supply[{t}, {s}, {i}] = {m.y_supply[t, s, i].value}")
-                print(f"q_charge[{t}, {s}] = {m.q_charge[t, s].value}")
-                print(f"q_discharge[{t}, {s}] = {m.q_discharge[t, s].value}")
-                print(f"e_storage[{t}] = {m.e_storage[t].value}")
-                print(f"z_export[{t}, {s}] = {m.z_export[t, s].value}")
-                print(f"x_aFRR[{t}] = {m.x_aFRR[t].value}")
-                print(f"x_hat[{t}] = {m.x_hat[t]}")
     return m
 
+# Function for creating new linear cuts for optimization problem (Inspired by code given as example for Benders decomposition in class)
+
+def Create_cuts(Cuts, m):
+    cut_it = len(Cuts["Set"])  # Find the current cut iteration index
+    Cuts["Set"].append(cut_it)  # Add a new cut to the set
+
+    # Add new Phi value for the new cut
+    Cuts["Phi"][cut_it] = pyo.value(m.obj)
+
+    # Add new lambda and x_hat values for the new cut
+    for t in m.T:
+        Cuts["lambda"][cut_it,t] = m.dual[m.Lambda_constraint[t]]
+        Cuts["x_hat"][cut_it,t] = pyo.value(m.x_hat[t])
+
+    return(Cuts)
+
+
+#Setup for Benders decomposition - Perform this for x-iterations
+Cuts = {}
+Cuts["Set"] = []
+Cuts["Phi"] = {}
+Cuts["lambda"] = {}
+Cuts["x_hat"] = {}
 
 # Solve the model
 def SolveModel(m): 
@@ -223,23 +217,7 @@ def SolveModel(m):
 def DisplayResults(m):
     return print(m.display(), m.dual.display())
 
-# Function for creating new linear cuts for optimization problem (Inspired by code given as example for Benders decomposition in class)
-def Create_cuts(Cuts, m):
-    cut_it = len(Cuts["Set"])  # Find the current cut iteration index
-    Cuts["Set"].append(cut_it)  # Add a new cut to the set
 
-    # Add new Phi value for the new cut
-    Cuts["Phi"][cut_it] = pyo.value(m.obj)
-
-    # Add new lambda and x_hat values for the new cut
-    #Cuts["lambda"][cut_it] = {}
-    #Cuts["x_hat"][cut_it] = {}
-
-    for t in m.T:
-        Cuts["lambda"][cut_it][t] = m.dual[m.Lambda_constraint[t]]        #pyo.value(m.dual[m.Lambda_constraint[t]])
-        Cuts["x_hat"][cut_it][t] = m.x_hat[t]       #pyo.value(m.x_hat[t])
-
-    return Cuts
 
 
 
@@ -253,7 +231,7 @@ for i in range(5):
 
     #First stage result process with x_hat value
     #First stage result process with x_hat value using numerical indices
-    x_hat = {t: pyo.value(m_first_stage.x_aFRR[t]) for t in range(1, 2)}
+    x_hat = {t: pyo.value(m_first_stage.x_aFRR[t]) for t in range(1, constants["time_periods"] + 1)}
 
   
     
@@ -284,6 +262,8 @@ for i in range(5):
                     print(f"Warning: {component}[{t}] not found")
         else:
             print(component, Cuts[component])
+
+    input()
 """
     #Print results for second stage
     print("Objective function:",pyo.value(m_second_stage.obj))
@@ -295,7 +275,7 @@ for i in range(5):
         else:
             print(component,Cuts[component])
 """
-input()
+    
 
 
 #Performing a convergence check with upper and lower bound
